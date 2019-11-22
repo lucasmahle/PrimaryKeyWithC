@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "bpt.h"
 
 
 /*Example:
@@ -42,7 +43,11 @@ int debug = 1;
 
 void getTableName(char *sql, char *name);
 
-void buildHeader(char *sql, char *tableName, int qtdPages);
+int buildHeader(char *sql, char *tableName, int qtdPages);
+
+void revertTableCreation(char *tableName);
+
+void generatePkFile(char *tableName, char *fieldName);
 
 void getAllAtributes(char *sql, char *attributes);
 
@@ -150,18 +155,37 @@ void createTable(char *sql) {
             return;
         }
 	
-    	buildHeader(sql, tableName, 1);
+    	if(buildHeader(sql, tableName, 1) == 1){
+            // a tabela eh invalida e deve ser revertida
+            revertTableCreation(tableName);
+        }
     } else {
         printf("Table %s already exist\n", tableName);
     }
 }
 
+void revertTableCreation(char *tableName){
+  	char pageName[600]; // define nome da página com 500 caracteres
 
-void buildHeader(char *sql, char *tableName, int qtdPages) {
-    char fieldName[15], fieldType; //nome e tipo do campo
+    // Deleta header
+    snprintf(pageName, sizeof(pageName), "%s/header.dat", tableName);
+    remove(pageName);
+
+    // Deleta pagina
+    snprintf(pageName, sizeof(pageName), "%s/page1.dat", tableName);  
+    remove(pageName);
+
+    rmdir(tableName);
+
+    if(debug) printf("Table %s was deleted\n", tableName);
+}
+
+int buildHeader(char *sql, char *tableName, int qtdPages) {
+    int invalidTable = 0; // flag principal, se retornar 1, a tabela eh revertida
+    char fieldName[15], pkFieldName[15], fieldType; //nome e tipo do campo
     char matchPKField[18], matchAIField[21]; // armazena a str de busca para verificar PK ou AI
     int fieldSize, isPkField, isAiField, i = 0; //tamanho do campo e variavel auxiliar
-    int isValidField = 0, isDynamicSizeType = 0, pkAlreadyDefined = 0; // flags
+    int isValidField = 0, isDynamicSizeType = 0, pkDefined = 0; // flags
     int initialAiValue = 0;
 
     char sqlCopy[1000], attribute[50], pageName[600];  
@@ -227,14 +251,22 @@ void buildHeader(char *sql, char *tableName, int qtdPages) {
             if(strstr(sql, matchPKField)){
                 isPkField = 1;
                 if(isDynamicSizeType){
-                    printf("Primary Key have to be an integer type\n");
-                    isPkField = 0;
+                    printf("Primary Key must to be an integer type\n");
+                    invalidTable = 1;
+                    break;
                 }
-                if(pkAlreadyDefined){
+                if(pkDefined){
                     printf("Primary Key is already defined\n");
-                    isPkField = 0;
+                    invalidTable = 1;
+                    break;
                 }
-                pkAlreadyDefined = 1;
+                if(i != 0){
+                    printf("Primary Key must to be the first field\n");
+                    invalidTable = 1;
+                    break;
+                }
+                pkDefined = 1;
+                strcpy(pkFieldName, fieldName);
 
                 snprintf(matchAIField, sizeof(matchAIField), "%s pk ai", fieldName); 
                 if(strstr(sql, matchAIField)){
@@ -260,8 +292,24 @@ void buildHeader(char *sql, char *tableName, int qtdPages) {
     fclose(headerPage); // fecha o arquivo de cabeçalho
 
 	leArquivo(tableName); // le o arquivo daquela tabela
+
+    if(pkDefined) {
+        generatePkFile(tableName, pkFieldName);
+    }
+
+    return invalidTable;
 }
 
+void generatePkFile(char *tableName, char *fieldName){
+    char pkFileName[600];  
+    
+    snprintf(pkFileName, sizeof(pkFileName), "%s/pk-%s.dat", tableName, fieldName); //define o nome do arquvio da pk
+    
+    if(debug) printf("PK file created at: %s\n", pkFileName);
+
+    FILE *filePk = fopen(pkFileName, "wb"); //instancia o arquvio de cabeçalho em modo de escrita e leitura
+    fclose(filePk); // fecha o arquivo de cabeçalho
+}
 
 void insertInto(char *sql, int numPage) { 
     char sqlCopy[1000], *token, tableName[500], pageName[600], headerName[600], attrSql[1000], attrSqlCopy[1000];
@@ -383,7 +431,7 @@ void insertInto(char *sql, int numPage) {
 
         //printf("OFFSET NEW ITEM: %d\n", newItem.offset);
 
-      	// percorre os campos do inser
+      	// percorre os campos do insert
         for(int i = 0; i < qtdFields; i++) {
             if(attributes[i].pk && attributes[i].ai){
                 fwrite(&aiValue, attributes[i].size, 1, page);
@@ -410,6 +458,7 @@ void insertInto(char *sql, int numPage) {
                 token = strtok(NULL, ",");
             }
         }
+        
         head.memFree = head.memFree - insertSize;
         head.next = newItem.offset;
         head.qtdItems += 1;

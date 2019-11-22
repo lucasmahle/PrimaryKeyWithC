@@ -1074,11 +1074,6 @@ int bptMain(int argc, char **argv)
     line_consumed = false;
     switch (instruction)
     {
-    case 'd':
-      scanf("%d", &input_key);
-      root = delete(root, input_key);
-      print_tree(root);
-      break;
     case 'i':
       fgets(buffer, BUFFER_SIZE, stdin);
       line_consumed = true;

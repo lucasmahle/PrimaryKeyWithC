@@ -1,5 +1,5 @@
 Criação de tabela com PK
-`create table teste3 (int a pk ai, char[100] b)`
+`create table teste3 (int a pk, char[100] b)`
 
 Criação de tabela com PK e AI
 `create table teste3 (int a pk ai, char[100] b)`
