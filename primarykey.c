@@ -39,7 +39,7 @@ typedef struct Attribute { // atributo da tabela sql, coluna da tabela sql
 
 // 0 - Oculta debug
 // 1 - Habilita debug
-int debug = 1;
+int debug = 0;
 
 void getTableName(char *sql, char *name);
 
@@ -52,6 +52,12 @@ void generatePkFile(char *tableName, char *fieldName);
 void getAllAtributes(char *sql, char *attributes);
 
 void leArquivo(char *tableName);
+
+node *loadTableBPT(node *root, char *tableName); 
+
+void saveTableBPT(node *root, char *tableName);
+
+int extreactPkValueFromSQL(char *sql);
 
 /**
  * Separa a operação do restante da string SQL 
@@ -302,23 +308,40 @@ int buildHeader(char *sql, char *tableName, int qtdPages) {
 
 void generatePkFile(char *tableName, char *fieldName){
     char pkFileName[600];  
-    
-    snprintf(pkFileName, sizeof(pkFileName), "%s/pk-%s.dat", tableName, fieldName); //define o nome do arquvio da pk
+    int idCount = 0;
+
+    snprintf(pkFileName, sizeof(pkFileName), "%s/pk.dat", tableName); //define o nome do arquivo da pk
     
     if(debug) printf("PK file created at: %s\n", pkFileName);
 
     FILE *filePk = fopen(pkFileName, "wb"); //instancia o arquvio de cabeçalho em modo de escrita e leitura
+    fwrite(&idCount, sizeof(int), 1, filePk); 
     fclose(filePk); // fecha o arquivo de cabeçalho
 }
 
+int extreactPkValueFromSQL(char *sql){
+    char *token;
+    
+    // Busca o primeiro valor, pois a PK sempre vai ser
+    // o primeiro campo da tabela
+    token = strtok(sql, "(,"); // procura os valores da inserção
+    token = strtok(NULL, "(,"); // continua a busca de onde parou na chamada acima
+
+    if(token == NULL)
+        return 0;
+
+    return atoi(token);
+}
+
 void insertInto(char *sql, int numPage) { 
-    char sqlCopy[1000], *token, tableName[500], pageName[600], headerName[600], attrSql[1000], attrSqlCopy[1000];
+    char sqlCopy[1000], sqlExtractPK[1000], *token, tableName[500], pageName[600], headerName[600], attrSql[1000], attrSqlCopy[1000];
     char endVarchar = '$', special = ' ', endChar = '\0';
     int insertSize = 0, qtdFields, nextItem, intVar, nextPage, qtdEndChar = 0;
-    int i = 0, countVarchar = 0;
+    int i = 0, countVarchar = 0, pkInserted;
     int pkFieldExist = 0, aiFieldExist = 0, aiValue = 0;
     attribute attributes[64];
     header head;
+    node *root = NULL;
 
     memset(sqlCopy, '\0', sizeof(sqlCopy)); //limpa a variavel que sera usada na copia do script sql
     strcpy(sqlCopy, sql); // script sql
@@ -334,6 +357,14 @@ void insertInto(char *sql, int numPage) {
 
     snprintf(headerName, sizeof(headerName), "%s/header.dat", tableName); // define o caminho para o cabeçalho da tabela
     FILE *headerPage = fopen(headerName, "rb+"); // abre o arquivo de cabeçalho
+ 
+    if(!headerPage) { // caso nao consiga abrir
+        printf("Table '%s' doesn't exist\n", tableName);
+        return;
+    }
+
+    // Carrega o a arvore
+    root = loadTableBPT(root, tableName);
 
 	// lê a quantidade de colunas da tabela
   	fread(&qtdFields, sizeof(int), 1, headerPage);
@@ -360,13 +391,28 @@ void insertInto(char *sql, int numPage) {
 	
     // le o valor de auto increment
     fread(&aiValue, sizeof(int), 1, headerPage);
+
     // incrementa o controle do ai e atualiza o cabecalho
     if(aiFieldExist){
         aiValue++;
         if(debug) printf("Next primary key value: %d\n", aiValue);
         fseek(headerPage, -sizeof(int), SEEK_CUR);
         fwrite(&aiValue, sizeof(int), 1, headerPage);
+    } else if(pkFieldExist == 1) {
+        if(debug) printf("Busca se chave já existe\n");
+        
+        memset(sqlExtractPK, '\0', sizeof(sqlExtractPK));
+        strcpy(sqlExtractPK, sql); 
+
+        pkInserted = extreactPkValueFromSQL(sqlExtractPK);
+        record * recordPk = find(root, pkInserted, false, NULL);
+
+        if(recordPk != NULL){
+            printf("Cannot duplicate a PK value\n");
+            return;
+        }
     }
+    
   	// procura no arquivo o caminho da proxima pagina
     fread(&nextPage, sizeof(int), 1, headerPage);
     if(debug) printf("Next page value: %d\n", nextPage);
@@ -432,9 +478,11 @@ void insertInto(char *sql, int numPage) {
         //printf("OFFSET NEW ITEM: %d\n", newItem.offset);
 
       	// percorre os campos do insert
+        int pkValue = 0;
         for(int i = 0; i < qtdFields; i++) {
             if(attributes[i].pk && attributes[i].ai){
                 fwrite(&aiValue, attributes[i].size, 1, page);
+                pkValue = aiValue;
 
             // char
       		} else if(attributes[i].type == 'C') {
@@ -446,6 +494,9 @@ void insertInto(char *sql, int numPage) {
             } else if(attributes[i].type == 'I') {
                 intVar = atoi(token);
                 fwrite(&intVar, attributes[i].size, 1, page);
+                if(attributes[i].pk) {
+                    pkValue = intVar;
+                }
 
             // varchar
             } else if(attributes[i].type == 'V') {
@@ -457,6 +508,12 @@ void insertInto(char *sql, int numPage) {
             if((aiFieldExist && i > 0) || !aiFieldExist) {
                 token = strtok(NULL, ",");
             }
+        }
+
+        // adicione o id na B+
+        if(pkFieldExist){
+            root = insert(root, pkValue, numPage, newItem.offset);
+            if(debug) printf("Inserindo info da chave %d: pag->%d offset->%d\n", pkValue, numPage, newItem.offset);
         }
         
         head.memFree = head.memFree - insertSize;
@@ -470,6 +527,9 @@ void insertInto(char *sql, int numPage) {
         fwrite(&head.qtdItems, sizeof(int), 1, page);
 
         fclose(page);
+
+        // salva a arvore
+        saveTableBPT(root, tableName);
 
         printf("New item inserted\n");
     } else {
@@ -540,6 +600,78 @@ void leArquivo(char *tableName) {
     //printf("MemFree - %d; Next - %d - QtdItems - %d\n", head.memFree, head.next, head.qtdItems);
 
     fclose(page); // fecha a página
+}
+
+void saveTableBPT(node * const root, char *tableName){
+    // print_leaves(root);
+    char pkFile[600];
+    int idCount = 0, i;
+    node *c = root;
+    record *data = NULL;
+
+    snprintf(pkFile, sizeof(pkFile), "%s/pk.dat", tableName); 
+    FILE *fp = fopen(pkFile, "wb"); 
+
+    if(fp == NULL){
+        return;
+    }
+    fwrite(&idCount, sizeof(int), 1, fp);
+
+    if(root != NULL){
+        while (!c->is_leaf)
+            c = c->pointers[0];
+
+        while (true){
+            for (i = 0; i < c->num_keys; i++){
+                data = (record *)c->pointers[i];
+                if(debug) printf("Inserindo no arquivo da B+ key(%d) page(%d) offset(%d)\n", c->keys[i], data->page, data->offset);
+                fwrite(&c->keys[i], sizeof(int), 1, fp);
+                fwrite(&data->page, sizeof(int), 1, fp);
+                fwrite(&data->offset, sizeof(int), 1, fp);
+                idCount++;
+            }
+            if (c->pointers[DEFAULT_ORDER - 1] != NULL) {
+            }
+            else
+                break;
+        }
+    }
+
+    fseek(fp, 0, SEEK_SET);
+    fwrite(&idCount, sizeof(int), 1, fp);
+    fclose(fp);
+
+    destroy_tree(root);
+}
+
+node *loadTableBPT(node *root, char *tableName){
+    char pkDataFIle[600];
+    int key, page, offset, idCount, i;
+
+    snprintf(pkDataFIle, sizeof(pkDataFIle), "%s/pk.dat", tableName); //define o caminho da pagina de determinada tabela
+
+    FILE *fp = fopen(pkDataFIle, "r"); // abre a pagina da tabela como leitura e escrita binária
+
+    if(fp != NULL){
+        // Le a quantidade de registros
+        fread(&idCount, sizeof(int), 1, fp);
+
+        if(idCount > 0){
+            for (i = 0; i < idCount; i++) {
+                fread(&key, sizeof(int), 1, fp);
+                fread(&page, sizeof(int), 1, fp);
+                fread(&offset, sizeof(int), 1, fp);
+                root = insert(root, key, page, offset);
+            }
+        }
+        if(debug) printf("Pk da tabela %s foi carregada com sucesso\n", tableName);
+    } else {
+        if(debug) printf("Pk da tabela %s não existe\n", tableName);
+    }
+
+    fclose(fp);
+
+    return root;
 }
 
 
